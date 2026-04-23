@@ -1332,6 +1332,7 @@
     body[data-role="viewer"] #txBulkHint{display:none !important}
   </style>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="/.netlify/functions/app-config"></script>
   <script src="https://unpkg.com/pdf-lib/dist/pdf-lib.min.js"></script>
 </head>
 <body>
@@ -1357,7 +1358,7 @@
     <div style="margin-top:12px;font-size:12px;color:var(--sub);line-height:1.8">請使用 Supabase Auth 已建立的 Email / 密碼登入。</div>
     </div>
     <div style="margin-top:14px;font-size:12px;color:var(--sub);line-height:1.8;text-align:left;max-width:460px;margin-left:auto;margin-right:auto">
-      角色可透過 SUPABASE_AUTH_PROFILES 或 Supabase user metadata 設定，例如 admin / supervisor / operator / viewer。
+      角色可透過 Supabase Auth 的 user metadata，或資料表 finance_profiles 設定，例如 admin / supervisor / operator / viewer。
     </div>
     <div style="margin-top:12px;font-size:12px;color:var(--sub)" id="authStatus">請輸入 Supabase Email / 密碼登入。</div>
   </div>
@@ -1822,7 +1823,7 @@
         <button class="secondary" id="btnPullFromSupabase" type="button">從 Supabase 重新載入</button>
       </div>
       <div class="footer-note" style="margin-top:12px">
-        請先在程式內填入 <code>SUPABASE_URL</code> 與 <code>SUPABASE_ANON_KEY</code>，並建立資料表 <code>finance_dashboard_state</code>。
+        請先在 Netlify 環境變數填入 <code>SUPABASE_URL</code> 與 <code>SUPABASE_ANON_KEY</code>，並在 Supabase 建立 <code>finance_transactions</code>、<code>finance_budgets</code>、<code>finance_app_configs</code>、<code>finance_profiles</code>。
       </div>
       <div style="margin-top:16px;">
         <label for="templatePdfInput">PDF 模板檔</label>
@@ -1840,15 +1841,20 @@
 
 <script>
 
+
 const AUTH_SESSION_KEY = 'finance_dashboard_local_auth_session';
-const SUPABASE_URL = 'https://qxgxszsjlkebolrndeas.supabase.co';
-const SUPABASE_ANON_KEY = 'sb_publishable_4mQ2T7yNYBuzpvAq-YhbXA_thRyDhEt';
-const SUPABASE_TABLE = 'finance_dashboard_state';
+const NETLIFY_APP_CONFIG = window.__APP_CONFIG__ || {};
+const SUPABASE_URL = String(NETLIFY_APP_CONFIG.SUPABASE_URL || '').trim();
+const SUPABASE_ANON_KEY = String(NETLIFY_APP_CONFIG.SUPABASE_ANON_KEY || '').trim();
 const SUPABASE_ENABLED = /^https:\/\//.test(SUPABASE_URL) && !SUPABASE_URL.includes('YOUR_PROJECT') && !!SUPABASE_ANON_KEY && !SUPABASE_ANON_KEY.includes('YOUR_SUPABASE');
 const SUPABASE_AUTO_SYNC_ENABLED = true;
 const SUPABASE_AUTO_PULL_INTERVAL_MS = 15000;
 const SUPABASE_AUTO_PULL_ON_FOCUS = true;
 const SUPABASE_SYNC_DEBOUNCE_MS = 600;
+const SUPABASE_TRANSACTIONS_TABLE = 'finance_transactions';
+const SUPABASE_BUDGETS_TABLE = 'finance_budgets';
+const SUPABASE_CONFIGS_TABLE = 'finance_app_configs';
+const SUPABASE_PROFILES_TABLE = 'finance_profiles';
 let supabaseClient = null;
 let remoteSaveTimer = null;
 let remoteSaveLocked = false;
@@ -1868,35 +1874,10 @@ const ROLE_RULES = {
 };
 const USER_PROFILE_RULES = {};
 const OPERATOR_BRAND_PERMISSIONS = {};
-const LOCAL_AUTH_USERS = {
-  admin: {
-    password: 'admin123',
-    role: 'admin',
-    displayName: 'Local Admin',
-    department: 'Finance',
-    title: 'Administrator',
-    allowedBrands: ['wiseedge', 'revovision']
-  },
-  operator: {
-    password: 'operator123',
-    role: 'operator',
-    displayName: 'Local Operator',
-    department: 'Operations',
-    title: 'Operator',
-    allowedBrands: ['wiseedge', 'revovision']
-  },
-  viewer: {
-    password: 'viewer123',
-    role: 'viewer',
-    displayName: 'Local Viewer',
-    department: 'Audit',
-    title: 'Viewer',
-    allowedBrands: ['wiseedge', 'revovision']
-  }
-};
 
 let currentUser = null;
 let currentRole = null;
+
 
 function isOperatorRole(){
   return currentRole === 'operator';
@@ -2335,10 +2316,13 @@ function clearLocalStateDirty(snapshot = state){
   suppressAutoPullUntil = 0;
   lastSyncedSnapshotText = getSnapshotText(snapshot);
 }
+
 function getSupabaseClient(){
   if(!SUPABASE_ENABLED || !window.supabase?.createClient) return null;
   if(!supabaseClient){
-    supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { auth: { persistSession: false } });
+    supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
+    });
   }
   return supabaseClient;
 }
@@ -2370,26 +2354,97 @@ function loadState(){
   saveLocalStateSnapshot(initial, getRemoteBrand());
   return initial;
 }
+function getConfigPayloadFromState(snapshot){
+  const normalized = normalizeLoadedState(snapshot);
+  return {
+    expenseNames: normalized.expenseNames,
+    categoryTree: normalized.categoryTree,
+    paymentMethods: normalized.paymentMethods,
+    currencies: normalized.currencies,
+    payees: normalized.payees
+  };
+}
+function buildSupabaseState(transactionsRows=[], budgetRows=[], configRow=null){
+  const configPayload = configRow?.payload && typeof configRow.payload === 'object' ? configRow.payload : {};
+  return normalizeLoadedState({
+    transactions: (transactionsRows || []).map(row => row?.payload || {}).filter(Boolean),
+    budgets: (budgetRows || []).map(row => row?.payload || {}).filter(Boolean),
+    expenseNames: configPayload.expenseNames,
+    categoryTree: configPayload.categoryTree,
+    paymentMethods: configPayload.paymentMethods,
+    currencies: configPayload.currencies,
+    payees: configPayload.payees
+  });
+}
+async function fetchBrandStateFromSupabase(brand = getRemoteBrand()){
+  const client = getSupabaseClient();
+  if(!client) throw new Error('Supabase 尚未初始化');
+  const [txRes, budgetRes, configRes] = await Promise.all([
+    client.from(SUPABASE_TRANSACTIONS_TABLE).select('id,payload,updated_at').eq('brand', brand).order('created_at', { ascending: false }),
+    client.from(SUPABASE_BUDGETS_TABLE).select('id,payload,updated_at').eq('brand', brand).order('created_at', { ascending: false }),
+    client.from(SUPABASE_CONFIGS_TABLE).select('brand,payload,updated_at').eq('brand', brand).maybeSingle()
+  ]);
+  if(txRes.error) throw txRes.error;
+  if(budgetRes.error) throw budgetRes.error;
+  if(configRes.error) throw configRes.error;
+  const updatedValues = [configRes.data?.updated_at, ...(txRes.data || []).map(r => r.updated_at), ...(budgetRes.data || []).map(r => r.updated_at)].filter(Boolean);
+  const latestUpdatedAt = updatedValues.sort().at(-1) || '';
+  return {
+    state: buildSupabaseState(txRes.data || [], budgetRes.data || [], configRes.data || null),
+    latestUpdatedAt
+  };
+}
+async function syncTableRows(client, tableName, brand, rows){
+  const { data: existingRows, error: existingError } = await client.from(tableName).select('id').eq('brand', brand);
+  if(existingError) throw existingError;
+  const incomingIds = new Set((rows || []).map(row => row.id));
+  const deleteIds = (existingRows || []).map(row => row.id).filter(id => !incomingIds.has(id));
+  if(deleteIds.length){
+    const { error: deleteError } = await client.from(tableName).delete().eq('brand', brand).in('id', deleteIds);
+    if(deleteError) throw deleteError;
+  }
+  if(rows && rows.length){
+    const { error: upsertError } = await client.from(tableName).upsert(rows, { onConflict: 'id' });
+    if(upsertError) throw upsertError;
+  }
+}
 async function persistStateToSupabase(brand = getRemoteBrand(), snapshot = state){
   const client = getSupabaseClient();
   if(!client || !currentUser) return;
   const payload = normalizeLoadedState(snapshot);
   const snapshotText = getSnapshotText(payload);
   const requestUpdatedAt = new Date().toISOString();
-  const { data, error } = await client
-    .from(SUPABASE_TABLE)
+  const updatedBy = currentUser.email || currentUser.username || 'unknown';
+  const transactionRows = (payload.transactions || []).map(item => ({
+    id: String(item.id),
+    brand,
+    payload: item,
+    created_by: updatedBy,
+    updated_by: updatedBy,
+    updated_at: requestUpdatedAt
+  }));
+  const budgetRows = (payload.budgets || []).map(item => ({
+    id: String(item.id),
+    brand,
+    payload: item,
+    created_by: updatedBy,
+    updated_by: updatedBy,
+    updated_at: requestUpdatedAt
+  }));
+  await syncTableRows(client, SUPABASE_TRANSACTIONS_TABLE, brand, transactionRows);
+  await syncTableRows(client, SUPABASE_BUDGETS_TABLE, brand, budgetRows);
+  const { error: configError } = await client
+    .from(SUPABASE_CONFIGS_TABLE)
     .upsert({
       brand,
-      payload,
-      updated_by: currentUser.username || currentUser.email || 'local',
+      payload: getConfigPayloadFromState(payload),
+      updated_by: updatedBy,
       updated_at: requestUpdatedAt
-    }, { onConflict: 'brand' })
-    .select('updated_at')
-    .single();
-  if(error) throw error;
-  lastRemoteUpdatedAt = data?.updated_at || requestUpdatedAt;
+    }, { onConflict: 'brand' });
+  if(configError) throw configError;
+  lastRemoteUpdatedAt = requestUpdatedAt;
   clearLocalStateDirty(payload);
-  setSupabaseStatus('已自動同步到 Supabase [' + brand + ']');
+  setSupabaseStatus('已自動同步到 Supabase 資料表 [' + brand + ']');
   return true;
 }
 function queueSupabaseSave(immediate=false){
@@ -2427,78 +2482,62 @@ async function hydrateStateFromSupabase(force=false, options={}){
     setSupabaseStatus('尚未設定 Supabase，現在使用瀏覽器本地資料');
     return false;
   }
-  const client = getSupabaseClient();
   const brand = getRemoteBrand();
   const silentIfUnchanged = !!options.silentIfUnchanged;
   try{
     if(!silentIfUnchanged) setSupabaseStatus('正在從 Supabase 載入 [' + brand + '] ...');
-    const { data, error } = await client.from(SUPABASE_TABLE).select('payload, updated_at').eq('brand', brand).maybeSingle();
-    if(error) throw error;
-    if(data && data.payload){
-      const incomingState = normalizeLoadedState(data.payload);
-      const incomingText = getSnapshotText(incomingState);
-      const currentText = getSnapshotText(state);
-      lastRemoteUpdatedAt = data.updated_at || lastRemoteUpdatedAt;
-      if(!force && incomingText === currentText){
-        clearLocalStateDirty(incomingState);
-        if(!silentIfUnchanged) setSupabaseStatus('雲端資料已是最新 [' + brand + ']');
-        return true;
-      }
-      if(!force && localStateDirty && Date.now() < suppressAutoPullUntil){
-        if(!silentIfUnchanged) setSupabaseStatus('本地有待同步變更，暫不覆蓋 [' + brand + ']');
-        return false;
-      }
-      state = incomingState;
-      ensureStateConfig({ skipPersist: true, skipRemote: true });
-      saveLocalStateSnapshot(state, brand);
-      refresh(true);
-      renderConfigEditors();
-      renderBudgetUsage();
-      renderBudgetTable();
-      clearLocalStateDirty(state);
-      setSupabaseStatus('已自動從 Supabase 載入最新資料 [' + brand + ']');
+    const result = await fetchBrandStateFromSupabase(brand);
+    const incomingState = result.state;
+    const incomingText = getSnapshotText(incomingState);
+    const currentText = getSnapshotText(state);
+    lastRemoteUpdatedAt = result.latestUpdatedAt || lastRemoteUpdatedAt;
+    if(!force && incomingText === currentText){
+      clearLocalStateDirty(incomingState);
+      if(!silentIfUnchanged) setSupabaseStatus('雲端資料已是最新 [' + brand + ']');
       return true;
     }
-    if(force){
-      await persistStateToSupabase(brand, state);
-      saveLocalStateSnapshot(state, brand);
+    if(!force && localStateDirty && Date.now() < suppressAutoPullUntil){
+      if(!silentIfUnchanged) setSupabaseStatus('本地有待同步變更，暫不覆蓋 [' + brand + ']');
+      return false;
     }
-    if(!silentIfUnchanged) setSupabaseStatus('Supabase 尚無 [' + brand + '] 資料，已使用本地資料');
-    return false;
+    state = incomingState;
+    ensureStateConfig({ skipPersist: true, skipRemote: true });
+    saveLocalStateSnapshot(state, brand);
+    refresh(true);
+    renderConfigEditors();
+    renderBudgetUsage();
+    renderBudgetTable();
+    clearLocalStateDirty(state);
+    if(!silentIfUnchanged) setSupabaseStatus('已從 Supabase 資料表載入最新資料 [' + brand + ']');
+    return true;
   }catch(err){
     console.error(err);
     setSupabaseStatus('載入失敗，' + (err.message || err), true);
     return false;
   }
 }
-
 async function hydrateAllowedBrandsFromSupabase(){
   if(!SUPABASE_ENABLED || !currentUser) return false;
-  const client = getSupabaseClient();
-  if(!client) return false;
   const allowedBrands = Array.from(new Set(getAllowedBrandsForUser(currentRole, currentUser?.username || ''))).filter(Boolean);
   if(!allowedBrands.length) return false;
   try{
     setSupabaseStatus('正在同步可見品牌資料...');
-    const { data, error } = await client.from(SUPABASE_TABLE).select('brand,payload,updated_at').in('brand', allowedBrands);
-    if(error) throw error;
     let loadedAny = false;
     let preferredBrand = getCurrentBrandId();
     let preferredState = null;
-    (data || []).forEach(row => {
-      if(!row?.brand || !row?.payload) return;
-      const incomingState = normalizeLoadedState(row.payload);
-      saveLocalStateSnapshot(incomingState, row.brand);
-      if(row.updated_at) lastRemoteUpdatedAt = row.updated_at;
-      if(row.brand === preferredBrand){
-        preferredState = incomingState;
+    for(const brand of allowedBrands){
+      const result = await fetchBrandStateFromSupabase(brand);
+      saveLocalStateSnapshot(result.state, brand);
+      if(result.latestUpdatedAt) lastRemoteUpdatedAt = result.latestUpdatedAt;
+      if(brand === preferredBrand){
+        preferredState = result.state;
       }
       if(!preferredState && !loadedAny){
-        preferredBrand = row.brand;
-        preferredState = incomingState;
+        preferredBrand = brand;
+        preferredState = result.state;
       }
       loadedAny = true;
-    });
+    }
     if(preferredState){
       if(getCurrentBrandId() !== preferredBrand){
         localStorage.setItem(BRAND_KEY, preferredBrand);
@@ -2517,24 +2556,22 @@ async function hydrateAllowedBrandsFromSupabase(){
     return false;
   }
 }
-
 async function checkSupabaseForRemoteChanges(force=false){
   if(!SUPABASE_AUTO_SYNC_ENABLED || !SUPABASE_ENABLED || !currentUser) return false;
   if(remotePullLocked || remoteSaveLocked) return false;
   if(!force && localStateDirty && Date.now() < suppressAutoPullUntil) return false;
-  const client = getSupabaseClient();
   const brand = getRemoteBrand();
-  if(!client) return false;
   remotePullLocked = true;
   try{
-    const { data, error } = await client.from(SUPABASE_TABLE).select('updated_at').eq('brand', brand).maybeSingle();
-    if(error) throw error;
-    if(!data || !data.updated_at) return false;
+    const result = await fetchBrandStateFromSupabase(brand);
+    if(!result.latestUpdatedAt){
+      return false;
+    }
     if(!lastRemoteUpdatedAt){
-      lastRemoteUpdatedAt = data.updated_at;
+      lastRemoteUpdatedAt = result.latestUpdatedAt;
       return hydrateStateFromSupabase(false, { silentIfUnchanged: true });
     }
-    const remoteTime = Date.parse(data.updated_at) || 0;
+    const remoteTime = Date.parse(result.latestUpdatedAt) || 0;
     const knownTime = Date.parse(lastRemoteUpdatedAt) || 0;
     if(force || remoteTime > knownTime){
       return hydrateStateFromSupabase(false, { silentIfUnchanged: true });
@@ -2575,7 +2612,7 @@ function startSupabaseAutoSync(){
     });
     autoSyncListenersBound = true;
   }
-  setSupabaseStatus('自動同步已啟動，變更會自動推送並定時更新 [' + getRemoteBrand() + ']');
+  setSupabaseStatus('自動同步已啟動，資料會寫入 transactions / budgets / app_configs [' + getRemoteBrand() + ']');
 }
 function saveState(options={}){
   const snapshot = normalizeLoadedState(state);
@@ -2586,6 +2623,7 @@ function saveState(options={}){
     queueSupabaseSave(!!options.immediateRemote);
   }
 }
+
 ensureStateConfig({ skipPersist: true, skipRemote: true });
 function money(n){ return Number(n || 0).toLocaleString('zh-Hant'); }
 function ym(dateStr){ return dateStr ? dateStr.slice(0,7) : ""; }
@@ -5255,37 +5293,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
 <script>
 (function(){
-  const SUPABASE_AUTH_PROFILES = {
-    'admin@example.com': {
-      role: 'admin',
-      displayName: 'Admin',
-      department: 'Finance',
-      title: 'Admin',
-      allowedBrands: ['wiseedge','revovision']
-    },
-    'supervisor@example.com': {
-      role: 'supervisor',
-      displayName: 'Supervisor',
-      department: 'Finance',
-      title: 'Supervisor',
-      allowedBrands: ['wiseedge','revovision']
-    },
-    'operator@example.com': {
-      role: 'operator',
-      displayName: 'Operator',
-      department: 'Operations',
-      title: 'Operator',
-      allowedBrands: ['wiseedge','revovision']
-    },
-    'viewer@example.com': {
-      role: 'viewer',
-      displayName: 'Viewer',
-      department: 'Audit',
-      title: 'Viewer',
-      allowedBrands: ['wiseedge','revovision']
-    }
-  };
-
   const REVIEW_PAGE_KEY = 'review';
   const PDF_REMOTE_IMAGE_CACHE = new Map();
   const APPROVAL_STATUS_META = {
@@ -5302,29 +5309,47 @@ document.addEventListener('DOMContentLoaded', () => {
   function isSupervisorRole(role = currentRole){ return role === 'supervisor'; }
   function isAdminLike(role = currentRole){ return role === 'admin' || role === 'supervisor'; }
   function getNormalizedEmail(value){ return String(value || '').trim().toLowerCase(); }
-  function getAuthProfileByEmail(email){ return SUPABASE_AUTH_PROFILES[getNormalizedEmail(email)] || null; }
   function getSupabaseUserMetadata(user){ return user && typeof user === 'object' ? (user.user_metadata || {}) : {}; }
   function normalizeAllowedBrands(value){
     const arr = parseBrands(value);
     return arr.length ? arr : ['wiseedge','revovision'];
   }
-  function resolveSupabaseAppUser(authUser){
+  async function fetchFinanceProfile(authUser){
+    const client = getSupabaseClient();
+    if(!client || !authUser) return null;
+    const email = getNormalizedEmail(authUser.email);
+    try{
+      const { data, error } = await client
+        .from(SUPABASE_PROFILES_TABLE)
+        .select('auth_user_id,email,role,display_name,department,title,signature,allowed_brands')
+        .or(`auth_user_id.eq.${authUser.id},email.eq.${email}`)
+        .limit(1)
+        .maybeSingle();
+      if(error && error.code !== 'PGRST116') throw error;
+      return data || null;
+    }catch(err){
+      console.warn('fetchFinanceProfile failed', err);
+      return null;
+    }
+  }
+  async function resolveSupabaseAppUser(authUser){
     if(!authUser || !authUser.email) return null;
     const email = getNormalizedEmail(authUser.email);
-    const mapped = getAuthProfileByEmail(email) || {};
     const meta = getSupabaseUserMetadata(authUser);
-    const role = normalizeIdentity(meta.role || mapped.role || 'viewer');
+    const dbProfile = await fetchFinanceProfile(authUser);
+    const role = normalizeIdentity(meta.role || dbProfile?.role || 'viewer');
     if(!['admin','supervisor','operator','viewer'].includes(role)) return null;
     return {
+      id: authUser.id,
       email,
-      username: String(meta.username || mapped.username || email.split('@')[0] || '').trim(),
+      username: String(meta.username || email.split('@')[0] || '').trim(),
       role,
-      displayName: meta.displayName || mapped.displayName || authUser.email,
-      name: meta.displayName || mapped.displayName || authUser.email,
-      department: meta.department || mapped.department || '',
-      title: meta.title || mapped.title || '',
-      signature: meta.signature || mapped.signature || '',
-      allowedBrands: normalizeAllowedBrands(meta.allowedBrands || mapped.allowedBrands)
+      displayName: meta.displayName || dbProfile?.display_name || authUser.email,
+      name: meta.displayName || dbProfile?.display_name || authUser.email,
+      department: meta.department || dbProfile?.department || '',
+      title: meta.title || dbProfile?.title || '',
+      signature: meta.signature || dbProfile?.signature || '',
+      allowedBrands: normalizeAllowedBrands(meta.allowedBrands || dbProfile?.allowed_brands)
     };
   }
   function normalizeApprovalState(tx){
@@ -5867,10 +5892,10 @@ document.addEventListener('DOMContentLoaded', () => {
       setAuthStatus('正在登入 Supabase...');
       const { data, error } = await client.auth.signInWithPassword({ email, password });
       if(error) throw error;
-      const user = resolveSupabaseAppUser(data?.user || data?.session?.user);
+      const user = await resolveSupabaseAppUser(data?.user || data?.session?.user);
       if(!user){
         await client.auth.signOut();
-        throw new Error('此 Email 尚未在 SUPABASE_AUTH_PROFILES 或 user metadata 設定角色。');
+        throw new Error('此 Email 尚未在 finance_profiles 或 user metadata 設定角色。');
       }
       unlockApp(user, user.role);
       if(qs('localPassword')) qs('localPassword').value = '';
@@ -5887,42 +5912,46 @@ document.addEventListener('DOMContentLoaded', () => {
     lockApp('已登出');
   }
 
-  initLocalAuth = function(){
-    renderSupabaseAuthCopy();
-    qs('btnLogout')?.addEventListener('click', doSupabaseLogout);
-    qs('btnLocalLogin')?.addEventListener('click', doSupabaseLogin);
-    qs('localUsername')?.addEventListener('keydown', (event) => { if(event.key === 'Enter') doSupabaseLogin(); });
-    qs('localPassword')?.addEventListener('keydown', (event) => { if(event.key === 'Enter') doSupabaseLogin(); });
-    if(!SUPABASE_ENABLED){
-      lockApp('請先設定 SUPABASE_URL 與 SUPABASE_ANON_KEY，再使用 Supabase Auth 登入。');
-      return;
+  
+initLocalAuth = function(){
+  renderSupabaseAuthCopy();
+  qs('btnLogout')?.addEventListener('click', doSupabaseLogout);
+  qs('btnLocalLogin')?.addEventListener('click', doSupabaseLogin);
+  qs('localUsername')?.addEventListener('keydown', (event) => { if(event.key === 'Enter') doSupabaseLogin(); });
+  qs('localPassword')?.addEventListener('keydown', (event) => { if(event.key === 'Enter') doSupabaseLogin(); });
+  if(!SUPABASE_ENABLED){
+    lockApp('請先設定 SUPABASE_URL 與 SUPABASE_ANON_KEY，再使用 Supabase Auth 登入。');
+    return;
+  }
+  const client = getSupabaseClient();
+  client.auth.onAuthStateChange(async (event, session) => {
+    if(session?.user){
+      const user = await resolveSupabaseAppUser(session.user);
+      if(user){
+        unlockApp(user, user.role);
+        return;
+      }
     }
-    const client = getSupabaseClient();
-    client.auth.onAuthStateChange((event, session) => {
-      if(session?.user){
-        const user = resolveSupabaseAppUser(session.user);
-        if(user) unlockApp(user, user.role);
-      }else{
-        lockApp('請使用 Supabase Email / 密碼登入。');
+    lockApp('請使用 Supabase Email / 密碼登入。');
+  });
+  client.auth.getSession().then(async ({ data }) => {
+    const authUser = data?.session?.user;
+    if(authUser){
+      const user = await resolveSupabaseAppUser(authUser);
+      if(user){
+        unlockApp(user, user.role);
+        setAuthStatus('已使用 Supabase 工作階段登入');
+        return;
       }
-    });
-    client.auth.getSession().then(({ data }) => {
-      const authUser = data?.session?.user;
-      if(authUser){
-        const user = resolveSupabaseAppUser(authUser);
-        if(user){
-          unlockApp(user, user.role);
-          setAuthStatus('已使用 Supabase 工作階段登入');
-          return;
-        }
-      }
-      lockApp('請使用 Supabase Email / 密碼登入。');
-    }).catch((err) => {
-      console.error(err);
-      lockApp('Supabase 登入初始化失敗');
-      setAuthStatus('Supabase 登入初始化失敗：' + (err.message || err), true);
-    });
-  };
+    }
+    lockApp('請使用 Supabase Email / 密碼登入。');
+  }).catch((err) => {
+    console.error(err);
+    lockApp('Supabase 登入初始化失敗');
+    setAuthStatus('Supabase 登入初始化失敗：' + (err.message || err), true);
+  });
+};
+
 
   const _domReadyPatch = () => {
     ensureReviewPageShell();
@@ -6091,48 +6120,14 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   const originalBuildEntryForm = buildEntryForm;
-  buildEntryForm = function(targetId){ originalBuildEntryForm(targetId); injectEntryEnhancements(); };
-
-  const originalOpenEditModal = window.openEditModal || openEditModal;
-  window.openEditModal = openEditModal = function(id){
-    originalOpenEditModal(id);
-    const overlay = document.getElementById('editModalOverlay');
-    const tx = (state.transactions || []).find(item => item.id === id);
-    if(!overlay || !tx) return;
-    if(!overlay.querySelector('#e-budgetGuard')){
-      const noteWrap = overlay.querySelector('#e-note')?.closest('div');
-      if(noteWrap){
-        noteWrap.insertAdjacentHTML('afterend', `
-          <div style="grid-column:1 / -1"><label>憑證附件（新增會附加）</label><input id="e-attachments" type="file" multiple accept="image/*,.pdf"><div id="e-attachmentPreview">${renderAttachmentRows(tx.attachments || [])}</div></div>
-          <div style="grid-column:1 / -1"><div id="e-budgetGuard"></div></div>
-        `);
-      }
-    }
-    const dateEl = overlay.querySelector('#e-date');
-    const budgetEl = overlay.querySelector('#e-budgetNo');
-    const amountEl = overlay.querySelector('#e-amount');
-    const guardEl = overlay.querySelector('#e-budgetGuard');
-    function refreshGuard(){ renderBudgetGuard(guardEl, { id: tx.id, date: dateEl?.value || '', budgetNo: budgetEl?.value || '', amount: Number(amountEl?.value || 0) }, Number(amountEl?.value || 0)); }
-    ['change','input'].forEach(evt => { dateEl?.addEventListener(evt, refreshGuard); budgetEl?.addEventListener(evt, refreshGuard); amountEl?.addEventListener(evt, refreshGuard); });
-    refreshGuard();
-    const oldBtn = overlay.querySelector('#editSaveBtn');
-    if(oldBtn){
-      const btn = oldBtn.cloneNode(true); oldBtn.replaceWith(btn);
-      btn.addEventListener('click', async () => {
-        const date = overlay.querySelector('#e-date').value.trim();
-        const name = overlay.querySelector('#e-name').value.trim();
-        const amount = Number(overlay.querySelector('#e-amount').value || 0);
-        if(!date || !name || !amount){ alert('請填寫 日期 / 費用名稱 / 金額'); return; }
-        const candidate = Object.assign({}, tx, { date, name, amount, budgetNo: overlay.querySelector('#e-budgetNo').value.trim() });
-        if(!assertBudgetGuard(candidate, amount)) return;
-        tx.date = date; tx.name = name; tx.amount = amount; tx.payment = overlay.querySelector('#e-payment').value.trim(); tx.paymentDueDate = overlay.querySelector('#e-paymentDueDate').value || '';
-        tx.project = overlay.querySelector('#e-project').value.trim(); tx.payee = overlay.querySelector('#e-payee').value.trim(); tx.invoiceInfo = overlay.querySelector('#e-invoiceInfo').value.trim(); tx.quantity = overlay.querySelector('#e-quantity').value.trim(); tx.budgetNo = overlay.querySelector('#e-budgetNo').value.trim(); tx.note = overlay.querySelector('#e-note').value.trim();
-        const newAttachments = await filesToAttachments(overlay.querySelector('#e-attachments')?.files || []);
-        tx.attachments = [...(Array.isArray(tx.attachments) ? tx.attachments : []), ...newAttachments];
-        saveState({ immediateRemote: true }); overlay.remove(); refresh(true); showToast('已更新');
-      });
-    }
+  buildEntryForm = function(targetId){
+    originalBuildEntryForm(targetId);
+    injectEntryEnhancements();
   };
+
+  // 第二版穩定修正：不在這裡包裝 openEditModal。
+  // 原本寫法會在 openEditModal 尚未宣告前直接讀取，導致整個頁面初始化中斷。
+  // 正式的編輯彈窗實作保留在後段統一覆寫。
 
   const originalRenderTable = renderTable;
   renderTable = function(list){
@@ -6571,6 +6566,7 @@ document.addEventListener('DOMContentLoaded', () => {
 (function(){
   function escapeHtmlSafe(str){ return String(str ?? '').replace(/[&<>"']/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s])); }
   const baseRenderAttachmentRows = window.renderAttachmentRows;
+  // 第二版穩定修正：由這裡提供唯一正式版 openEditModal / editTransaction，避免多次 monkey patch 衝突。
   window.openEditModal = window.openEditModal || window.editTransaction;
   window.openEditModal = window.editTransaction = function(id){
     const tx = (state.transactions || []).find(t => t.id === id);

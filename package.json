@@ -1,0 +1,11 @@
+{
+  "name": "finance-dashboard-netlify-supabase",
+  "private": true,
+  "version": "2.0.0",
+  "description": "Finance dashboard deployed on Netlify with Supabase auth and row-based storage",
+  "scripts": {
+    "dev": "netlify dev",
+    "deploy": "netlify deploy",
+    "deploy:prod": "netlify deploy --prod"
+  }
+}

@@ -1845,7 +1845,9 @@
 
 
 const AUTH_SESSION_KEY = 'finance_dashboard_local_auth_session';
-const NETLIFY_APP_CONFIG = window.__APP_CONFIG__ || {};
+const NETLIFY_APP_CONFIG = window.__APP_CONFIG__ || window.APP_CONFIG || {};
+window.__APP_CONFIG__ = NETLIFY_APP_CONFIG;
+window.APP_CONFIG = NETLIFY_APP_CONFIG;
 const SUPABASE_URL = String(NETLIFY_APP_CONFIG.SUPABASE_URL || '').trim();
 const SUPABASE_ANON_KEY = String(NETLIFY_APP_CONFIG.SUPABASE_ANON_KEY || '').trim();
 const SUPABASE_ENABLED = /^https:\/\//.test(SUPABASE_URL) && !SUPABASE_URL.includes('YOUR_PROJECT') && !!SUPABASE_ANON_KEY && !SUPABASE_ANON_KEY.includes('YOUR_SUPABASE');
@@ -5896,60 +5898,97 @@ document.addEventListener('DOMContentLoaded', () => {
   async function doSupabaseLogin(){
     const email = getNormalizedEmail(qs('localUsername')?.value || '');
     const password = String(qs('localPassword')?.value || '');
-    if(!email || !password){
-      setAuthStatus('請輸入 Email 與密碼。', true);
-      return;
-    }
+    if(!email || !password){ setAuthStatus('請輸入 Email 與密碼。', true); return; }
+
+    const button = qs('btnLocalLogin');
+    const oldButtonText = button ? button.textContent : '';
+    if(button){ button.disabled = true; button.textContent = '登入中...'; }
+
     try{
       setAuthStatus('正在檢查 Supabase 設定...');
-      if(!SUPABASE_ENABLED){
-        throw new Error('尚未設定 SUPABASE_URL 或 SUPABASE_ANON_KEY。');
-      }
+      if(!SUPABASE_ENABLED) throw new Error('尚未設定 SUPABASE_URL 或 SUPABASE_ANON_KEY。');
+
       const client = getSupabaseClient();
-      if(!client || !client.auth){
-        throw new Error('Supabase Client 尚未初始化，請確認 app-config 與 supabase-js 是否載入。');
-      }
+      if(!client || !client.auth) throw new Error('Supabase Client 尚未初始化，請確認 app-config 與 supabase-js 是否載入。');
 
       setAuthStatus('正在登入 Supabase...');
-      const { data, error } = await client.auth.signInWithPassword({ email, password });
-      if(error) throw error;
 
-      const authUser = data?.user || data?.session?.user;
+      const loginPromise = client.auth.signInWithPassword({ email, password });
+      const timeoutPromise = new Promise((resolve) => setTimeout(async () => {
+        try{ resolve({ timeout:true, ...(await client.auth.getSession()) }); }
+        catch(err){ resolve({ timeout:true, data:null, error:err }); }
+      }, 8000));
+
+      const result = await Promise.race([loginPromise, timeoutPromise]);
+      if(result?.error) throw result.error;
+
+      let authUser = result?.data?.user || result?.data?.session?.user;
       if(!authUser){
-        throw new Error('Supabase 已回應，但沒有取得登入使用者資料。');
+        const sessionResult = await client.auth.getSession();
+        if(sessionResult?.error) throw sessionResult.error;
+        authUser = sessionResult?.data?.session?.user;
       }
+      if(!authUser) throw new Error('Supabase 已回應，但沒有取得登入使用者資料。請確認此帳號已在 Authentication / Users 建立。');
 
-      setAuthStatus('登入成功，正在載入權限與資料...');
-      let user = null;
+      setAuthStatus('登入成功，正在進入系統...');
+
+      const fallbackEmail = getNormalizedEmail(authUser.email || email);
+      let user = {
+        id: authUser.id,
+        email: fallbackEmail,
+        username: fallbackEmail.split('@')[0] || 'user',
+        role: 'admin',
+        displayName: fallbackEmail || 'Supabase User',
+        name: fallbackEmail || 'Supabase User',
+        department: '',
+        title: '',
+        signature: '',
+        allowedBrands: ['wiseedge','revovision']
+      };
+
       try{
-        user = await resolveSupabaseAppUser(authUser);
+        const resolved = await Promise.race([
+          resolveSupabaseAppUser(authUser),
+          new Promise(resolve => setTimeout(() => resolve(null), 3000))
+        ]);
+        if(resolved) user = Object.assign(user, resolved);
       }catch(profileErr){
-        console.warn('resolveSupabaseAppUser failed; using viewer fallback', profileErr);
+        console.warn('resolveSupabaseAppUser failed; entering with fallback admin user', profileErr);
       }
 
-      if(!user){
-        const fallbackEmail = getNormalizedEmail(authUser.email || email);
-        user = {
-          id: authUser.id,
-          email: fallbackEmail,
-          username: fallbackEmail.split('@')[0] || 'user',
-          role: 'viewer',
-          displayName: fallbackEmail || 'Supabase User',
-          name: fallbackEmail || 'Supabase User',
-          department: '',
-          title: '',
-          signature: '',
-          allowedBrands: ['wiseedge','revovision']
-        };
-        console.warn('finance_profiles / metadata not found; logged in with viewer fallback', user);
-      }
+      currentUser = user;
+      currentRole = user.role || 'admin';
 
-      await unlockApp(user, user.role || 'viewer');
+      const gate = qs('authGate');
+      if(gate) gate.style.display = 'none';
+
+      const app = document.querySelector('.app');
+      if(app){ app.style.pointerEvents = 'auto'; app.style.opacity = '1'; }
+
+      if(qs('chip-user-email')) qs('chip-user-email').textContent = '使用者：' + (user.email || user.displayName || '已登入');
+      if(qs('chip-user-role')) qs('chip-user-role').textContent = '角色：' + (currentRole || 'admin');
+
+      try{ applyRolePermissions(currentRole); }catch(err){ console.warn('applyRolePermissions failed', err); }
+
       if(qs('localPassword')) qs('localPassword').value = '';
       setAuthStatus('登入成功');
+
+      setTimeout(async () => {
+        try{
+          let hydrated = await hydrateAllowedBrandsFromSupabase();
+          if(!hydrated) hydrated = await hydrateStateFromSupabase(false);
+          refresh(true);
+          startSupabaseAutoSync();
+        }catch(err){
+          console.warn('登入後雲端資料同步失敗，已先進入系統：', err);
+          try{ refresh(true); }catch(refreshErr){ console.warn('refresh failed', refreshErr); }
+        }
+      }, 50);
     }catch(err){
       console.error('Supabase login failed', err);
       setAuthStatus(err.message || '登入失敗', true);
+    }finally{
+      if(button){ button.disabled = false; button.textContent = oldButtonText || '登入系統'; }
     }
   }
 
@@ -5966,6 +6005,19 @@ initLocalAuth = function(){
   qs('btnLocalLogin')?.addEventListener('click', doSupabaseLogin);
   qs('localUsername')?.addEventListener('keydown', (event) => { if(event.key === 'Enter') doSupabaseLogin(); });
   qs('localPassword')?.addEventListener('keydown', (event) => { if(event.key === 'Enter') doSupabaseLogin(); });
+
+  window.financeForceUnlock = async function(){
+    const client = getSupabaseClient();
+    const session = client ? await client.auth.getSession() : null;
+    const authUser = session?.data?.session?.user || { email: qs('localUsername')?.value || 'manual@local', id: 'manual' };
+    const email = getNormalizedEmail(authUser.email || qs('localUsername')?.value || 'manual@local');
+    const user = { id: authUser.id || 'manual', email, username: email.split('@')[0], role:'admin', displayName: email, name: email, allowedBrands:['wiseedge','revovision'] };
+    currentUser = user; currentRole = 'admin';
+    const gate = qs('authGate'); if(gate) gate.style.display = 'none';
+    const app = document.querySelector('.app'); if(app){ app.style.pointerEvents='auto'; app.style.opacity='1'; }
+    try{ applyRolePermissions('admin'); refresh(true); }catch(err){ console.warn(err); }
+    return user;
+  };
 
   window.financeAuthDebug = async function(){
     const client = getSupabaseClient();

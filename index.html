@@ -1340,29 +1340,24 @@
 <body>
 <div id="authGate" style="position:fixed;inset:0;background:rgba(11,16,32,.92);display:flex;align-items:center;justify-content:center;z-index:99999;">
   <div style="width:min(560px,92vw);background:var(--card);border:1px solid var(--line);border-radius:28px;padding:28px;box-shadow:var(--shadow-2);text-align:center">
-    <div style="font-size:13px;font-weight:800;color:var(--sub);letter-spacing:.08em;">SUPABASE AUTH</div>
-    <h2 style="margin:10px 0 8px;font-size:28px;color:var(--primary-2)">Supabase Email / 密碼登入</h2>
-    <p style="margin:0 0 18px;color:var(--sub);line-height:1.8">請使用 Supabase Auth 的 Email / 密碼登入。系統會依 Email 或 user metadata 套用角色與品牌權限。</p>
+    <div style="font-size:13px;font-weight:800;color:var(--sub);letter-spacing:.08em;">GOOGLE AUTH</div>
+    <h2 style="margin:10px 0 8px;font-size:28px;color:var(--primary-2)">Google 帳號登入</h2>
+    <p style="margin:0 0 18px;color:var(--sub);line-height:1.8">請使用 Google 帳號登入。登入後系統會依 Email / user metadata / finance_profiles 套用角色與品牌權限。</p>
     <div style="display:grid;gap:10px;text-align:left;margin:0 auto 16px;max-width:460px;padding:16px 18px;border:1px solid var(--line);border-radius:18px;background:var(--card-2)">
       <div style="font-size:13px;font-weight:800;color:var(--primary-2)">登入規則</div>
-      <div style="font-size:12px;color:var(--sub);line-height:1.9">1. 使用 Supabase Auth 的 Email / 密碼登入<br>2. 系統會依 Email 對應角色與品牌<br>3. 未授權的Email將無法進入系統</div>
+      <div style="font-size:12px;color:var(--sub);line-height:1.9">1. 使用 Google 帳號 OAuth 登入<br>2. 系統會依 Google Email 對應角色與品牌<br>3. 不再使用密碼欄位</div>
     </div>
     <div style="display:grid;gap:10px;max-width:460px;margin:0 auto;text-align:left">
-      <div>
-        <label for="localUsername">帳號</label>
-        <input id="localUsername" type="text" autocomplete="username" placeholder="請輸入 Email">
-      </div>
-      <div>
-        <label for="localPassword">密碼</label>
-        <input id="localPassword" type="password" autocomplete="current-password" placeholder="請輸入密碼">
-      </div>
-      <button id="btnLocalLogin" class="primary" type="button" style="width:100%">登入系統</button>
-    <div style="margin-top:12px;font-size:12px;color:var(--sub);line-height:1.8">請使用 Supabase Auth 已建立的 Email / 密碼登入。</div>
+      <button id="btnLocalLogin" class="primary" type="button" style="width:100%;display:flex;align-items:center;justify-content:center;gap:10px">
+        <span style="display:inline-flex;width:22px;height:22px;border-radius:50%;background:#fff;align-items:center;justify-content:center;color:#111;font-weight:900">G</span>
+        使用 Google 帳號登入
+      </button>
+      <div style="margin-top:12px;font-size:12px;color:var(--sub);line-height:1.8;text-align:center">點擊後會跳轉到 Google 登入頁，完成後自動回到系統。</div>
     </div>
     <div style="margin-top:14px;font-size:12px;color:var(--sub);line-height:1.8;text-align:left;max-width:460px;margin-left:auto;margin-right:auto">
-      角色可透過 Supabase Auth 的 user metadata，或資料表 finance_profiles 設定，例如 admin / supervisor / operator / viewer。
+      角色可透過 Supabase Auth 的 user metadata，或資料表 finance_profiles 設定，例如 admin / supervisor / operator / viewer。Google OAuth 僅負責身份驗證。
     </div>
-    <div style="margin-top:12px;font-size:12px;color:var(--sub)" id="authStatus">請輸入 Supabase Email / 密碼登入。</div>
+    <div style="margin-top:12px;font-size:12px;color:var(--sub)" id="authStatus">請使用 Google 帳號登入。</div>
   </div>
 </div>
 <div class="app" style="pointer-events:none;opacity:.72">
@@ -5890,111 +5885,51 @@ document.addEventListener('DOMContentLoaded', () => {
     const gate = qs('authGate');
     if(!gate) return;
     const hint = gate.querySelector('#authStatus');
-    if(hint) hint.textContent = '請使用 Supabase Auth 的 Email / 密碼登入。';
+    if(hint) hint.textContent = '請使用 Google 帳號登入。';
     const helper = gate.querySelector('div[style*="測試帳號"]');
-    if(helper) helper.innerHTML = '請改為使用 Supabase Auth 建立的帳號，例如：admin@example.com / 你的密碼';
+    if(helper) helper.innerHTML = '請使用 Google 帳號登入。';
   }
 
   async function doSupabaseLogin(){
-    const email = getNormalizedEmail(qs('localUsername')?.value || '');
-    const password = String(qs('localPassword')?.value || '');
-    if(!email || !password){ setAuthStatus('請輸入 Email 與密碼。', true); return; }
-
     const button = qs('btnLocalLogin');
     const oldButtonText = button ? button.textContent : '';
-    if(button){ button.disabled = true; button.textContent = '登入中...'; }
+    if(button){ button.disabled = true; button.textContent = '正在前往 Google 登入...'; }
 
     try{
-      setAuthStatus('正在檢查 Supabase 設定...');
+      setAuthStatus('正在檢查 Supabase Google OAuth 設定...');
       if(!SUPABASE_ENABLED) throw new Error('尚未設定 SUPABASE_URL 或 SUPABASE_ANON_KEY。');
 
       const client = getSupabaseClient();
       if(!client || !client.auth) throw new Error('Supabase Client 尚未初始化，請確認 app-config 與 supabase-js 是否載入。');
 
-      setAuthStatus('正在登入 Supabase...');
+      const redirectTo = window.location.origin + window.location.pathname;
+      setAuthStatus('正在開啟 Google 登入頁...');
 
-      const loginPromise = client.auth.signInWithPassword({ email, password });
-      const timeoutPromise = new Promise((resolve) => setTimeout(async () => {
-        try{ resolve({ timeout:true, ...(await client.auth.getSession()) }); }
-        catch(err){ resolve({ timeout:true, data:null, error:err }); }
-      }, 8000));
-
-      const result = await Promise.race([loginPromise, timeoutPromise]);
-      if(result?.error) throw result.error;
-
-      let authUser = result?.data?.user || result?.data?.session?.user;
-      if(!authUser){
-        const sessionResult = await client.auth.getSession();
-        if(sessionResult?.error) throw sessionResult.error;
-        authUser = sessionResult?.data?.session?.user;
-      }
-      if(!authUser) throw new Error('Supabase 已回應，但沒有取得登入使用者資料。請確認此帳號已在 Authentication / Users 建立。');
-
-      setAuthStatus('登入成功，正在進入系統...');
-
-      const fallbackEmail = getNormalizedEmail(authUser.email || email);
-      let user = {
-        id: authUser.id,
-        email: fallbackEmail,
-        username: fallbackEmail.split('@')[0] || 'user',
-        role: 'admin',
-        displayName: fallbackEmail || 'Supabase User',
-        name: fallbackEmail || 'Supabase User',
-        department: '',
-        title: '',
-        signature: '',
-        allowedBrands: ['wiseedge','revovision']
-      };
-
-      try{
-        const resolved = await Promise.race([
-          resolveSupabaseAppUser(authUser),
-          new Promise(resolve => setTimeout(() => resolve(null), 3000))
-        ]);
-        if(resolved) user = Object.assign(user, resolved);
-      }catch(profileErr){
-        console.warn('resolveSupabaseAppUser failed; entering with fallback admin user', profileErr);
-      }
-
-      currentUser = user;
-      currentRole = user.role || 'admin';
-
-      const gate = qs('authGate');
-      if(gate) gate.style.display = 'none';
-
-      const app = document.querySelector('.app');
-      if(app){ app.style.pointerEvents = 'auto'; app.style.opacity = '1'; }
-
-      if(qs('chip-user-email')) qs('chip-user-email').textContent = '使用者：' + (user.email || user.displayName || '已登入');
-      if(qs('chip-user-role')) qs('chip-user-role').textContent = '角色：' + (currentRole || 'admin');
-
-      try{ applyRolePermissions(currentRole); }catch(err){ console.warn('applyRolePermissions failed', err); }
-
-      if(qs('localPassword')) qs('localPassword').value = '';
-      setAuthStatus('登入成功');
-
-      setTimeout(async () => {
-        try{
-          let hydrated = await hydrateAllowedBrandsFromSupabase();
-          if(!hydrated) hydrated = await hydrateStateFromSupabase(false);
-          refresh(true);
-          startSupabaseAutoSync();
-        }catch(err){
-          console.warn('登入後雲端資料同步失敗，已先進入系統：', err);
-          try{ refresh(true); }catch(refreshErr){ console.warn('refresh failed', refreshErr); }
+      const { data, error } = await client.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo,
+          queryParams: {
+            access_type: 'offline',
+            prompt: 'select_account'
+          }
         }
-      }, 50);
+      });
+
+      if(error) throw error;
+      setAuthStatus('已送出 Google 登入請求，請在 Google 頁面完成登入...');
+      if(data?.url){
+        window.location.href = data.url;
+      }
     }catch(err){
-      console.error('Supabase login failed', err);
-      setAuthStatus(err.message || '登入失敗', true);
-    }finally{
-      if(button){ button.disabled = false; button.textContent = oldButtonText || '登入系統'; }
+      console.error('Google OAuth login failed', err);
+      setAuthStatus(err.message || 'Google 登入失敗', true);
+      if(button){ button.disabled = false; button.textContent = oldButtonText || '使用 Google 帳號登入'; }
     }
   }
 
   async function doSupabaseLogout(){
     try{ await getSupabaseClient()?.auth.signOut(); }catch(err){}
-    if(qs('localPassword')) qs('localPassword').value = '';
     lockApp('已登出');
   }
 
@@ -6003,10 +5938,7 @@ initLocalAuth = function(){
   renderSupabaseAuthCopy();
   qs('btnLogout')?.addEventListener('click', doSupabaseLogout);
   qs('btnLocalLogin')?.addEventListener('click', doSupabaseLogin);
-  qs('localUsername')?.addEventListener('keydown', (event) => { if(event.key === 'Enter') doSupabaseLogin(); });
-  qs('localPassword')?.addEventListener('keydown', (event) => { if(event.key === 'Enter') doSupabaseLogin(); });
-
-  window.financeForceUnlock = async function(){
+    window.financeForceUnlock = async function(){
     const client = getSupabaseClient();
     const session = client ? await client.auth.getSession() : null;
     const authUser = session?.data?.session?.user || { email: qs('localUsername')?.value || 'manual@local', id: 'manual' };
@@ -6033,7 +5965,7 @@ initLocalAuth = function(){
   };
 
   if(!SUPABASE_ENABLED){
-    lockApp('請先設定 SUPABASE_URL 與 SUPABASE_ANON_KEY，再使用 Supabase Auth 登入。');
+    lockApp('請先設定 SUPABASE_URL 與 SUPABASE_ANON_KEY，再使用 Google 登入。');
     return;
   }
 
@@ -6072,7 +6004,7 @@ initLocalAuth = function(){
         setAuthStatus('已登入');
         return;
       }
-      lockApp('請使用 Supabase Email / 密碼登入。');
+      lockApp('請使用 Google 帳號登入。');
     }catch(err){
       console.error('Auth state handling failed', err);
       setAuthStatus('登入後初始化失敗：' + (err.message || err), true);
@@ -6108,7 +6040,7 @@ initLocalAuth = function(){
       setAuthStatus('已使用 Supabase 工作階段登入');
       return;
     }
-    lockApp('請使用 Supabase Email / 密碼登入。');
+    lockApp('請使用 Google 帳號登入。');
   }).catch((err) => {
     console.error(err);
     lockApp('Supabase 登入初始化失敗');

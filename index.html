@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>財務記帳與 Dashboard</title>
+  <meta name="finance-build" content="enterprise-stable-login-v3" />
   
   <style>
     :root{
@@ -1331,6 +1332,7 @@
     #authGate button.primary{min-width:220px}
     body[data-role="viewer"] #txBulkHint{display:none !important}
   </style>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 64 64%27%3E%3Crect width=%2764%27 height=%2764%27 rx=%2714%27 fill=%27%231f4e79%27/%3E%3Ctext x=%2732%27 y=%2741%27 text-anchor=%27middle%27 font-size=%2730%27 fill=%27white%27 font-family=%27Arial%27%3EF%3C/text%3E%3C/svg%3E">
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script src="/.netlify/functions/app-config"></script>
   <script src="https://unpkg.com/pdf-lib/dist/pdf-lib.min.js"></script>
@@ -2326,6 +2328,21 @@ function getSupabaseClient(){
   }
   return supabaseClient;
 }
+
+// Enterprise stable debug hooks: allow DevTools checks without depending on internal scope.
+window.FINANCE_BUILD = 'enterprise-stable-login-v3';
+window.FINANCE_SUPABASE_INFO = {
+  enabled: SUPABASE_ENABLED,
+  url: SUPABASE_URL,
+  hasAnonKey: !!SUPABASE_ANON_KEY,
+  tables: {
+    transactions: SUPABASE_TRANSACTIONS_TABLE,
+    budgets: SUPABASE_BUDGETS_TABLE,
+    configs: SUPABASE_CONFIGS_TABLE,
+    profiles: SUPABASE_PROFILES_TABLE
+  }
+};
+window.getSupabaseClient = getSupabaseClient;
 function getRemoteBrand(){
   return getCurrentBrandId && typeof getCurrentBrandId === 'function' ? getCurrentBrandId() : (localStorage.getItem(BRAND_KEY) || 'wiseedge');
 }
@@ -5883,25 +5900,55 @@ document.addEventListener('DOMContentLoaded', () => {
       setAuthStatus('請輸入 Email 與密碼。', true);
       return;
     }
-    if(!SUPABASE_ENABLED){
-      setAuthStatus('尚未設定 SUPABASE_URL 或 SUPABASE_ANON_KEY。', true);
-      return;
-    }
-    const client = getSupabaseClient();
     try{
+      setAuthStatus('正在檢查 Supabase 設定...');
+      if(!SUPABASE_ENABLED){
+        throw new Error('尚未設定 SUPABASE_URL 或 SUPABASE_ANON_KEY。');
+      }
+      const client = getSupabaseClient();
+      if(!client || !client.auth){
+        throw new Error('Supabase Client 尚未初始化，請確認 app-config 與 supabase-js 是否載入。');
+      }
+
       setAuthStatus('正在登入 Supabase...');
       const { data, error } = await client.auth.signInWithPassword({ email, password });
       if(error) throw error;
-      const user = await resolveSupabaseAppUser(data?.user || data?.session?.user);
-      if(!user){
-        await client.auth.signOut();
-        throw new Error('此 Email 尚未在 finance_profiles 或 user metadata 設定角色。');
+
+      const authUser = data?.user || data?.session?.user;
+      if(!authUser){
+        throw new Error('Supabase 已回應，但沒有取得登入使用者資料。');
       }
-      unlockApp(user, user.role);
+
+      setAuthStatus('登入成功，正在載入權限與資料...');
+      let user = null;
+      try{
+        user = await resolveSupabaseAppUser(authUser);
+      }catch(profileErr){
+        console.warn('resolveSupabaseAppUser failed; using viewer fallback', profileErr);
+      }
+
+      if(!user){
+        const fallbackEmail = getNormalizedEmail(authUser.email || email);
+        user = {
+          id: authUser.id,
+          email: fallbackEmail,
+          username: fallbackEmail.split('@')[0] || 'user',
+          role: 'viewer',
+          displayName: fallbackEmail || 'Supabase User',
+          name: fallbackEmail || 'Supabase User',
+          department: '',
+          title: '',
+          signature: '',
+          allowedBrands: ['wiseedge','revovision']
+        };
+        console.warn('finance_profiles / metadata not found; logged in with viewer fallback', user);
+      }
+
+      await unlockApp(user, user.role || 'viewer');
       if(qs('localPassword')) qs('localPassword').value = '';
       setAuthStatus('登入成功');
     }catch(err){
-      console.error(err);
+      console.error('Supabase login failed', err);
       setAuthStatus(err.message || '登入失敗', true);
     }
   }
@@ -5919,30 +5966,95 @@ initLocalAuth = function(){
   qs('btnLocalLogin')?.addEventListener('click', doSupabaseLogin);
   qs('localUsername')?.addEventListener('keydown', (event) => { if(event.key === 'Enter') doSupabaseLogin(); });
   qs('localPassword')?.addEventListener('keydown', (event) => { if(event.key === 'Enter') doSupabaseLogin(); });
+
+  window.financeAuthDebug = async function(){
+    const client = getSupabaseClient();
+    const session = client ? await client.auth.getSession() : null;
+    return {
+      build: window.FINANCE_BUILD,
+      config: window.FINANCE_SUPABASE_INFO,
+      appConfig: window.APP_CONFIG,
+      hasWindowSupabase: !!window.supabase,
+      hasClient: !!client,
+      session
+    };
+  };
+
   if(!SUPABASE_ENABLED){
     lockApp('請先設定 SUPABASE_URL 與 SUPABASE_ANON_KEY，再使用 Supabase Auth 登入。');
     return;
   }
+
   const client = getSupabaseClient();
+  if(!client){
+    lockApp('Supabase Client 初始化失敗。');
+    setAuthStatus('Supabase Client 初始化失敗，請檢查 app-config 與 supabase-js。', true);
+    return;
+  }
+
   client.auth.onAuthStateChange(async (event, session) => {
-    if(session?.user){
-      const user = await resolveSupabaseAppUser(session.user);
-      if(user){
-        unlockApp(user, user.role);
+    try{
+      if(session?.user){
+        let user = null;
+        try{
+          user = await resolveSupabaseAppUser(session.user);
+        }catch(profileErr){
+          console.warn('onAuthStateChange profile fallback', profileErr);
+        }
+        if(!user){
+          const fallbackEmail = getNormalizedEmail(session.user.email || '');
+          user = {
+            id: session.user.id,
+            email: fallbackEmail,
+            username: fallbackEmail.split('@')[0] || 'user',
+            role: 'viewer',
+            displayName: fallbackEmail || 'Supabase User',
+            name: fallbackEmail || 'Supabase User',
+            department: '',
+            title: '',
+            signature: '',
+            allowedBrands: ['wiseedge','revovision']
+          };
+        }
+        await unlockApp(user, user.role || 'viewer');
+        setAuthStatus('已登入');
         return;
       }
+      lockApp('請使用 Supabase Email / 密碼登入。');
+    }catch(err){
+      console.error('Auth state handling failed', err);
+      setAuthStatus('登入後初始化失敗：' + (err.message || err), true);
+      // Do not freeze forever: keep the user on the login screen with a visible error.
     }
-    lockApp('請使用 Supabase Email / 密碼登入。');
   });
+
   client.auth.getSession().then(async ({ data }) => {
     const authUser = data?.session?.user;
     if(authUser){
-      const user = await resolveSupabaseAppUser(authUser);
-      if(user){
-        unlockApp(user, user.role);
-        setAuthStatus('已使用 Supabase 工作階段登入');
-        return;
+      let user = null;
+      try{
+        user = await resolveSupabaseAppUser(authUser);
+      }catch(profileErr){
+        console.warn('getSession profile fallback', profileErr);
       }
+      if(!user){
+        const fallbackEmail = getNormalizedEmail(authUser.email || '');
+        user = {
+          id: authUser.id,
+          email: fallbackEmail,
+          username: fallbackEmail.split('@')[0] || 'user',
+          role: 'viewer',
+          displayName: fallbackEmail || 'Supabase User',
+          name: fallbackEmail || 'Supabase User',
+          department: '',
+          title: '',
+          signature: '',
+          allowedBrands: ['wiseedge','revovision']
+        };
+      }
+      await unlockApp(user, user.role || 'viewer');
+      setAuthStatus('已使用 Supabase 工作階段登入');
+      return;
     }
     lockApp('請使用 Supabase Email / 密碼登入。');
   }).catch((err) => {
@@ -5951,6 +6063,7 @@ initLocalAuth = function(){
     setAuthStatus('Supabase 登入初始化失敗：' + (err.message || err), true);
   });
 };
+
 
 
   const _domReadyPatch = () => {
@@ -6120,14 +6233,48 @@ initLocalAuth = function(){
   }
 
   const originalBuildEntryForm = buildEntryForm;
-  buildEntryForm = function(targetId){
-    originalBuildEntryForm(targetId);
-    injectEntryEnhancements();
-  };
+  buildEntryForm = function(targetId){ originalBuildEntryForm(targetId); injectEntryEnhancements(); };
 
-  // 第二版穩定修正：不在這裡包裝 openEditModal。
-  // 原本寫法會在 openEditModal 尚未宣告前直接讀取，導致整個頁面初始化中斷。
-  // 正式的編輯彈窗實作保留在後段統一覆寫。
+  const originalOpenEditModal = window.openEditModal || openEditModal;
+  window.openEditModal = openEditModal = function(id){
+    originalOpenEditModal(id);
+    const overlay = document.getElementById('editModalOverlay');
+    const tx = (state.transactions || []).find(item => item.id === id);
+    if(!overlay || !tx) return;
+    if(!overlay.querySelector('#e-budgetGuard')){
+      const noteWrap = overlay.querySelector('#e-note')?.closest('div');
+      if(noteWrap){
+        noteWrap.insertAdjacentHTML('afterend', `
+          <div style="grid-column:1 / -1"><label>憑證附件（新增會附加）</label><input id="e-attachments" type="file" multiple accept="image/*,.pdf"><div id="e-attachmentPreview">${renderAttachmentRows(tx.attachments || [])}</div></div>
+          <div style="grid-column:1 / -1"><div id="e-budgetGuard"></div></div>
+        `);
+      }
+    }
+    const dateEl = overlay.querySelector('#e-date');
+    const budgetEl = overlay.querySelector('#e-budgetNo');
+    const amountEl = overlay.querySelector('#e-amount');
+    const guardEl = overlay.querySelector('#e-budgetGuard');
+    function refreshGuard(){ renderBudgetGuard(guardEl, { id: tx.id, date: dateEl?.value || '', budgetNo: budgetEl?.value || '', amount: Number(amountEl?.value || 0) }, Number(amountEl?.value || 0)); }
+    ['change','input'].forEach(evt => { dateEl?.addEventListener(evt, refreshGuard); budgetEl?.addEventListener(evt, refreshGuard); amountEl?.addEventListener(evt, refreshGuard); });
+    refreshGuard();
+    const oldBtn = overlay.querySelector('#editSaveBtn');
+    if(oldBtn){
+      const btn = oldBtn.cloneNode(true); oldBtn.replaceWith(btn);
+      btn.addEventListener('click', async () => {
+        const date = overlay.querySelector('#e-date').value.trim();
+        const name = overlay.querySelector('#e-name').value.trim();
+        const amount = Number(overlay.querySelector('#e-amount').value || 0);
+        if(!date || !name || !amount){ alert('請填寫 日期 / 費用名稱 / 金額'); return; }
+        const candidate = Object.assign({}, tx, { date, name, amount, budgetNo: overlay.querySelector('#e-budgetNo').value.trim() });
+        if(!assertBudgetGuard(candidate, amount)) return;
+        tx.date = date; tx.name = name; tx.amount = amount; tx.payment = overlay.querySelector('#e-payment').value.trim(); tx.paymentDueDate = overlay.querySelector('#e-paymentDueDate').value || '';
+        tx.project = overlay.querySelector('#e-project').value.trim(); tx.payee = overlay.querySelector('#e-payee').value.trim(); tx.invoiceInfo = overlay.querySelector('#e-invoiceInfo').value.trim(); tx.quantity = overlay.querySelector('#e-quantity').value.trim(); tx.budgetNo = overlay.querySelector('#e-budgetNo').value.trim(); tx.note = overlay.querySelector('#e-note').value.trim();
+        const newAttachments = await filesToAttachments(overlay.querySelector('#e-attachments')?.files || []);
+        tx.attachments = [...(Array.isArray(tx.attachments) ? tx.attachments : []), ...newAttachments];
+        saveState({ immediateRemote: true }); overlay.remove(); refresh(true); showToast('已更新');
+      });
+    }
+  };
 
   const originalRenderTable = renderTable;
   renderTable = function(list){
@@ -6566,7 +6713,6 @@ initLocalAuth = function(){
 (function(){
   function escapeHtmlSafe(str){ return String(str ?? '').replace(/[&<>"']/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s])); }
   const baseRenderAttachmentRows = window.renderAttachmentRows;
-  // 第二版穩定修正：由這裡提供唯一正式版 openEditModal / editTransaction，避免多次 monkey patch 衝突。
   window.openEditModal = window.openEditModal || window.editTransaction;
   window.openEditModal = window.editTransaction = function(id){
     const tx = (state.transactions || []).find(t => t.id === id);

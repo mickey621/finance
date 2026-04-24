@@ -6287,46 +6287,9 @@ initLocalAuth = function(){
   const originalBuildEntryForm = buildEntryForm;
   buildEntryForm = function(targetId){ originalBuildEntryForm(targetId); injectEntryEnhancements(); };
 
-  const originalOpenEditModal = window.openEditModal || openEditModal;
-  window.openEditModal = openEditModal = function(id){
-    originalOpenEditModal(id);
-    const overlay = document.getElementById('editModalOverlay');
-    const tx = (state.transactions || []).find(item => item.id === id);
-    if(!overlay || !tx) return;
-    if(!overlay.querySelector('#e-budgetGuard')){
-      const noteWrap = overlay.querySelector('#e-note')?.closest('div');
-      if(noteWrap){
-        noteWrap.insertAdjacentHTML('afterend', `
-          <div style="grid-column:1 / -1"><label>憑證附件（新增會附加）</label><input id="e-attachments" type="file" multiple accept="image/*,.pdf"><div id="e-attachmentPreview">${renderAttachmentRows(tx.attachments || [])}</div></div>
-          <div style="grid-column:1 / -1"><div id="e-budgetGuard"></div></div>
-        `);
-      }
-    }
-    const dateEl = overlay.querySelector('#e-date');
-    const budgetEl = overlay.querySelector('#e-budgetNo');
-    const amountEl = overlay.querySelector('#e-amount');
-    const guardEl = overlay.querySelector('#e-budgetGuard');
-    function refreshGuard(){ renderBudgetGuard(guardEl, { id: tx.id, date: dateEl?.value || '', budgetNo: budgetEl?.value || '', amount: Number(amountEl?.value || 0) }, Number(amountEl?.value || 0)); }
-    ['change','input'].forEach(evt => { dateEl?.addEventListener(evt, refreshGuard); budgetEl?.addEventListener(evt, refreshGuard); amountEl?.addEventListener(evt, refreshGuard); });
-    refreshGuard();
-    const oldBtn = overlay.querySelector('#editSaveBtn');
-    if(oldBtn){
-      const btn = oldBtn.cloneNode(true); oldBtn.replaceWith(btn);
-      btn.addEventListener('click', async () => {
-        const date = overlay.querySelector('#e-date').value.trim();
-        const name = overlay.querySelector('#e-name').value.trim();
-        const amount = Number(overlay.querySelector('#e-amount').value || 0);
-        if(!date || !name || !amount){ alert('請填寫 日期 / 費用名稱 / 金額'); return; }
-        const candidate = Object.assign({}, tx, { date, name, amount, budgetNo: overlay.querySelector('#e-budgetNo').value.trim() });
-        if(!assertBudgetGuard(candidate, amount)) return;
-        tx.date = date; tx.name = name; tx.amount = amount; tx.payment = overlay.querySelector('#e-payment').value.trim(); tx.paymentDueDate = overlay.querySelector('#e-paymentDueDate').value || '';
-        tx.project = overlay.querySelector('#e-project').value.trim(); tx.payee = overlay.querySelector('#e-payee').value.trim(); tx.invoiceInfo = overlay.querySelector('#e-invoiceInfo').value.trim(); tx.quantity = overlay.querySelector('#e-quantity').value.trim(); tx.budgetNo = overlay.querySelector('#e-budgetNo').value.trim(); tx.note = overlay.querySelector('#e-note').value.trim();
-        const newAttachments = await filesToAttachments(overlay.querySelector('#e-attachments')?.files || []);
-        tx.attachments = [...(Array.isArray(tx.attachments) ? tx.attachments : []), ...newAttachments];
-        saveState({ immediateRemote: true }); overlay.remove(); refresh(true); showToast('已更新');
-      });
-    }
-  };
+  // openEditModal is defined later as the formal edit modal implementation.
+  // Do not wrap or reference it here; older builds crashed at login with
+  // "ReferenceError: openEditModal is not defined" before auth could finish.
 
   const originalRenderTable = renderTable;
   renderTable = function(list){
